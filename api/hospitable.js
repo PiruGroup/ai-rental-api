@@ -1,8 +1,8 @@
 // api/hospitable.js
 
-import axios from 'axios';
+const axios = require('axios');
 
-export default async function handler(req, res) {
+module.exports = async function handler(req, res) {
   try {
     const response = await axios.get('https://api.hospitable.com/v1/properties', {
       headers: {
@@ -16,4 +16,4 @@ export default async function handler(req, res) {
     console.error('Hospitable API error:', error.message);
     res.status(500).json({ error: 'Failed to fetch data from Hospitable' });
   }
-}
+};
