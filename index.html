@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Rental Availability Assistant</title>
+  <style>
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      max-width: 700px;
+      margin: 40px auto;
+      padding: 0 16px;
+    }
+    h1 { font-size: 1.6rem; margin-bottom: 0.5rem; }
+    form { margin-bottom: 1rem; }
+    input[type="text"] {
+      width: 100%;
+      padding: 8px;
+      font-size: 1rem;
+      box-sizing: border-box;
+    }
+    select, input[type="number"] {
+      margin-top: 8px;
+      padding: 4px 8px;
+      font-size: 0.95rem;
+    }
+    button {
+      margin-top: 8px;
+      padding: 8px 16px;
+      font-size: 1rem;
+      cursor: pointer;
+    }
+    .status { margin: 10px 0; color: #555; }
+    .error { color: #b00020; }
+    .results { margin-top: 16px; }
+    .property {
+      padding: 8px 0;
+      border-bottom: 1px solid #eee;
+    }
+    .property a { color: #0066cc; text-decoration: none; }
+    .property a:hover { text-decoration: underline; }
+    .mode-row {
+      margin-top: 8px;
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    textarea {
+      width: 100%;
+      box-sizing: border-box;
+      font-family: monospace;
+      font-size: 0.95rem;
+      padding: 8px;
+      margin-top: 8px;
+    }
+  </style>
+</head>
+<body>
+  <h1>Rental Availability Assistant</h1>
+  <p>Paste the guest email text below, e.g.:<br>
+     <em>"Hi, I'm looking for an apartment from 11/01/2025 through 03/01/2026..."</em>
+  </p>
+
+  <form id="query-form">
+    <input
+      type="text"
+      id="query-input"
+      placeholder="Paste or type the availability request..."
+      required
+    />
+
+    <div class="mode-row">
+      <label>
+        Mode:
+        <select id="mode-select">
+          <option value="full-stay">Exact stay (every night free)</option>
+          <option value="any-night">Any nights in this period</option>
+          <option value="streak">At least N consecutive nights</option>
+        </select>
+      </label>
+
+      <span id="streak-config" style="display:none;">
+        Min nights:
+        <input type="number" id="min-nights-input" value="7" min="1" style="width:60px;" />
+      </span>
+    </div>
+
+    <button type="submit">Check Availability</button>
+  </form>
+
+  <div id="status" class="status"></div>
+  <div id="results" class="results"></div>
+
+  <h2>Email reply (copy & paste)</h2>
+  <textarea id="email-output" rows="6" placeholder="Run a search to generate email text..."></textarea>
+  <button id="copy-email-btn" type="button">Copy email text</button>
+
+  <script>
+    const form = document.getElementById('query-form');
+    const input = document.getElementById('query-input');
+    const statusEl = document.getElementById('status');
+    const resultsEl = document.getElementById('results');
+    const modeSelect = document.getElementById('mode-select');
+    const streakConfig = document.getElementById('streak-config');
+    const minNightsInput = document.getElementById('min-nights-input');
+    const emailOutput = document.getElementById('email-output');
+    const copyEmailBtn = document.getElementById('copy-email-btn');
+
+    // Show/hide min-nights field based on mode
+    modeSelect.addEventListener('change', () => {
+      if (modeSelect.value === 'streak') {
+        streakConfig.style.display = 'inline-block';
+      } else {
+        streakConfig.style.display = 'none';
+      }
+    });
+
+    copyEmailBtn.addEventListener('click', async () => {
+      const text = emailOutput.value.trim();
+      if (!text) return;
+      try {
+        await navigator.clipboard.writeText(text);
+        alert('Email text copied to clipboard.');
+      } catch (err) {
+        console.error('Clipboard error:', err);
+        alert('Could not copy automatically. Please select and copy manually.');
+      }
+    });
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const query = input.value.trim();
+      if (!query) return;
+
+      const mode = modeSelect.value;
+      const minNights = minNightsInput.value || 7;
+
+      resultsEl.innerHTML = '';
+      emailOutput.value = '';
+      statusEl.textContent = 'Understanding the request...';
+
+      try {
+        // 1) Ask the parser to extract dates (POST)
+        const parseRes = await fetch('/api/parse_availability_query', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ query }),
+        });
+
+        const parsed = await parseRes.json();
+        console.log('Parsed dates:', parsed);
+
+        if (!parseRes.ok || parsed.error || !parsed.startDate || !parsed.endDate) {
+          statusEl.innerHTML = '<span class="error">Could not understand the dates from this email. Please adjust and try again.</span>';
+          return;
+        }
+
+        let modeDescription = '';
+        if (mode === 'full-stay') {
+          modeDescription = 'that are fully available for this entire stay';
+        } else if (mode === 'any-night') {
+          modeDescription = 'that have some availability in this period';
+        } else {
+          modeDescription = `that have at least ${minNights} consecutive nights available in this period`;
+        }
+
+        statusEl.textContent =
+          `Searching for properties ${modeDescription} from ${parsed.startDate} to ${parsed.endDate}...`;
+
+        // 2) Call your Hospitable availability endpoint (GET)
+        const params = new URLSearchParams({
+          startDate: parsed.startDate,
+          endDate: parsed.endDate,
+          mode,
+        });
+        if (mode === 'streak') {
+          params.append('minNights', String(minNights));
+        }
+
+        const availUrl = `/api/get_available_properties?${params.toString()}`;
+        console.log('Calling availability URL:', availUrl);
+
+        const availRes = await fetch(availUrl);
+        const properties = await availRes.json();
+        console.log('Available properties:', properties, 'status:', availRes.status);
+
+        if (!availRes.ok) {
+          statusEl.innerHTML = `<span class="error">Failed to fetch availability (status ${availRes.status}).</span>`;
+          resultsEl.textContent = JSON.stringify(properties);
+          return;
+        }
+
+        // No properties matched
+        if (!Array.isArray(properties) || properties.length === 0) {
+          statusEl.textContent = 'No properties matched that criteria for that range.';
+          resultsEl.innerHTML = '';
+
+          // Email template for no availability
+          emailOutput.value =
+            `Hi,\n\n` +
+            `Unfortunately we don’t have any properties available for your requested dates (${parsed.startDate} to ${parsed.endDate}).\n\n` +
+            `If your dates are flexible, let us know and we can suggest some alternatives.\n\n` +
+            `Thanks,\n` +
+            `David`;
+          return;
+        }
+
+        statusEl.textContent = `Found ${properties.length} propert${properties.length === 1 ? 'y' : 'ies'} ${modeDescription}:`;
+
+        // 3) Render UI list
+        resultsEl.innerHTML = properties.map(p => `
+          <div class="property">
+            <strong>${p.name || 'Unnamed property'}</strong><br />
+            ${p.url
+              ? `<a href="${p.url}" target="_blank" rel="noopener noreferrer">${p.url}</a>`
+              : (p.uuid ? `<code>${p.uuid}</code>` : '')}
+          </div>
+        `).join('');
+
+        // 4) Build email-ready text (links only)
+        const lines = [];
+        lines.push('Hi,');
+        lines.push('Here are the property links:');
+        lines.push('');
+
+        properties.forEach((p) => {
+          const link = p.url || p.uuid || '';
+          if (link) {
+            lines.push(link);
+          }
+        });
+
+        lines.push('');
+        lines.push('If you have any issues booking, just reach out and we’ll assist right away.');
+        lines.push('');
+        lines.push('Thanks,');
+        lines.push('David');
+
+        emailOutput.value = lines.join('\n');
+      } catch (err) {
+        console.error(err);
+        statusEl.innerHTML = '<span class="error">An unexpected error occurred.</span>';
+      }
+    });
+  </script>
+</body>
+</html>
